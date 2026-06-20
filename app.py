@@ -1,50 +1,49 @@
 import streamlit as st
 import pandas as pd
-import time
+import PyPDF2
 import re
 from io import BytesIO
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 st.set_page_config(page_title="Ders Bilgi Güncelleyici", layout="centered", page_icon="📚")
 
-st.title("📚 Ders Bilgi Paketi Otomatik Doldurucu")
+st.title("📚 PDF'ten Ders Bilgi Otomatik Doldurucu")
+st.markdown("""
+Bu araç, **Excel dosyanızdaki** ders kodlarını okur ve yüklediğiniz **Bologna PDF** dosyasının içinde arayarak eksik bilgileri (AKTS, Saat, Dersin Amacı ve İçeriği) saniyeler içinde doldurur. İnternet engellerine takılmaz!
+""")
 
-@st.cache_resource
-def get_driver():
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('window-size=1920x1080')
-    service = Service('/usr/bin/chromedriver')
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
+col1, col2 = st.columns(2)
 
-uploaded_file = st.file_uploader("Lütfen dosyanızı (.xlsx veya .csv) buraya yükleyin", type=['csv', 'xlsx'])
+with col1:
+    excel_file = st.file_uploader("1. Excel/CSV Dosyanız", type=['csv', 'xlsx'])
 
-if uploaded_file is not None:
+with col2:
+    pdf_file = st.file_uploader("2. Ders PDF Dosyanız", type=['pdf'])
+
+if excel_file and pdf_file:
     try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file, skiprows=6)
+        # 1. Excel/CSV Dosyasını Oku
+        if excel_file.name.endswith('.csv'):
+            df = pd.read_csv(excel_file, skiprows=6)
         else:
-            df = pd.read_excel(uploaded_file, skiprows=6)
+            df = pd.read_excel(excel_file, skiprows=6)
             
-        st.success("Dosya başarıyla okundu!")
+        # 2. PDF Dosyasını Oku ve Metne Çevir
+        with st.spinner("PDF dosyası okunuyor, lütfen bekleyin..."):
+            reader = PyPDF2.PdfReader(pdf_file)
+            pdf_text = ""
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    pdf_text += extracted + "\n"
+                    
+        st.success("Her iki dosya da başarıyla okundu!")
         
         if 'İşlem Durumu' not in df.columns:
             df['İşlem Durumu'] = "İşlem Görmedi"
-        
-        if st.button("🚀 Tarama İşlemini Başlat ve Güncelle"):
+            
+        if st.button("🚀 PDF'ten Verileri Çek ve Güncelle"):
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
-            driver = get_driver()
-            bologna_url = "https://obs.osmaniye.edu.tr/oibs/bologna/index.aspx?lang=tr&curOp=showPac&curUnit=29&curSunit=5815#"
             toplam_ders = len(df)
             
             for index, row in df.iterrows():
@@ -53,71 +52,72 @@ if uploaded_file is not None:
                 if pd.isna(row['Dersin Kodu']) or ders_kodu == "nan":
                     progress_bar.progress((index + 1) / toplam_ders)
                     continue
-                    
-                # Harf ve rakam arasına otomatik boşluk koy (Örn: EMBO101 -> EMBO 101)
-                sitedeki_kod = re.sub(r'([A-Za-zğüşıöçĞÜŞİÖÇ]+)(\d+)', r'\1 \2', ders_kodu)
                 
-                status_text.text(f"İşleniyor: {sitedeki_kod} aranıyor...")
+                status_text.text(f"PDF içinde aranıyor: {ders_kodu}...")
                 
-                try:
-                    driver.get(bologna_url)
-                    time.sleep(2) 
+                # --- PDF İÇİN AKILLI ARAMA MANTIĞI ---
+                # Harf ve rakamları ayırarak daha esnek arama yapalım
+                harfler = "".join([c for c in ders_kodu if not c.isdigit()]).strip()
+                rakamlar = "".join([c for c in ders_kodu if c.isdigit()]).strip()
+                
+                # Bazen O harfi yerine 0 yazılmış olabilir diye esneklik payı
+                harfler_sifirsiz = harfler.replace("O", "(O|0)")
+                pattern = re.compile(rf"{harfler_sifirsiz}\s*{rakamlar}", re.IGNORECASE)
+                
+                match = pattern.search(pdf_text)
+                
+                veri_bulundu_mu = False
+                akts_saat_bulundu = False
+                
+                if match:
+                    # 1. Dersin Amacı ve İçeriğini Bulma
+                    start_idx = match.start()
+                    # İlgili dersten sonraki 3000 karakterlik bloğu al
+                    block = pdf_text[start_idx:start_idx+3000] 
                     
-                    # 1. ADIM: Doğrudan ders kodunun yazılı olduğu linki bul
-                    xpath_sorgusu = f"//a[contains(text(), '{ders_kodu}') or contains(text(), '{sitedeki_kod}')]"
+                    # Türkçe karakterlere ve olası boşluklara duyarlı Regex araması
+                    amac_match = re.search(r'Dersin\s*Amac[ıi]\s*:\s*(.*?)(?=Dersin\s*İçerik(?:leri)?\s*:|$)', block, re.DOTALL | re.IGNORECASE)
+                    icerik_match = re.search(r'Dersin\s*İçerik(?:leri)?\s*:\s*(.*?)(?=Haftalık|Öğrenme|Kaynaklar|Değerlendirme|Koordinatör|$)', block, re.DOTALL | re.IGNORECASE)
                     
-                    try:
-                        ders_linki = WebDriverWait(driver, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, xpath_sorgusu))
-                        )
-                        # Tıklamadan önce ekranda o bölüme kaydır
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", ders_linki)
-                        time.sleep(1)
-                        driver.execute_script("arguments[0].click();", ders_linki)
-                        time.sleep(2) 
-                    except:
-                        df.at[index, 'İşlem Durumu'] = f"HATA: '{sitedeki_kod}' sayfada link olarak bulunamadı."
-                        progress_bar.progress((index + 1) / toplam_ders)
-                        continue
+                    amac = amac_match.group(1).strip() if amac_match else ""
+                    icerik = icerik_match.group(1).strip() if icerik_match else ""
                     
-                    # 2. ADIM: İçerik Sayfasından Verileri Çek
-                    veri_bulundu = False
+                    # Satır atlamalarını tek boşluğa indirge
+                    amac = re.sub(r'\s+', ' ', amac)
+                    icerik = re.sub(r'\s+', ' ', icerik)
                     
-                    try:
-                        akts = driver.find_element(By.XPATH, "//*[contains(translate(@id, 'akts', 'AKTS'), 'AKTS')]").text
-                        df.at[index, 'AKTS'] = akts
-                        veri_bulundu = True
-                    except:
-                        pass
-                        
-                    try:
-                        ders_amaci = driver.find_element(By.XPATH, "//*[contains(translate(@id, 'amac', 'AMAC'), 'AMAC')]").text
-                        df.at[index, 'Dersin Amacı ve İçeriği'] = ders_amaci
-                        veri_bulundu = True
-                    except:
-                        pass
-                        
-                    try:
-                        haftalik_saat = driver.find_element(By.XPATH, "//*[contains(translate(@id, 'teorik', 'TEORIK'), 'TEORIK') or contains(translate(@id, 'saat', 'SAAT'), 'SAAT')]").text
-                        df.at[index, 'Haftalık Ders Saati'] = haftalik_saat
-                        veri_bulundu = True
-                    except:
-                        pass
-                    
-                    df.at[index, 'Varsa Ders Bilgi Paketi Adresi'] = driver.current_url
-                    
-                    if veri_bulundu:
-                        df.at[index, 'İşlem Durumu'] = "BAŞARILI"
+                    if amac or icerik:
+                        df.at[index, 'Dersin Amacı ve İçeriği'] = f"{amac} {icerik}".strip()
+                        veri_bulundu_mu = True
+
+                    # 2. AKTS ve Ders Saati Bulma
+                    for line in pdf_text.split('\n'):
+                        if pattern.search(line):
+                            # Satırdaki tüm bağımsız rakamları bul
+                            nums = re.findall(r'\b\d+\b', line)
+                            # Genelde Kredi formatı "T U K AKTS" olduğu için
+                            if len(nums) >= 3:
+                                df.at[index, 'AKTS'] = nums[-1] 
+                                df.at[index, 'Haftalık Ders Saati'] = nums[-3]
+                                akts_saat_bulundu = True
+                                break
+                                
+                    # Durumu Raporla
+                    if veri_bulundu_mu and akts_saat_bulundu:
+                        df.at[index, 'İşlem Durumu'] = "BAŞARILI: PDF'ten tüm veriler çekildi."
+                    elif veri_bulundu_mu or akts_saat_bulundu:
+                        df.at[index, 'İşlem Durumu'] = "KISMİ: Sadece bazı veriler bulundu."
                     else:
-                        df.at[index, 'İşlem Durumu'] = "KISMİ HATA: Linke tıklandı ama içerik ID'leri eşleşmedi."
+                        df.at[index, 'İşlem Durumu'] = "BULUNAMADI: PDF içinde dersin adı bulundu ama tablo/amaç formatı okunamadı."
                         
-                except Exception as e:
-                    df.at[index, 'İşlem Durumu'] = f"SİSTEM HATASI: {str(e)[:50]}"
-                
+                else:
+                    df.at[index, 'İşlem Durumu'] = "EKSİK DERS: Bu ders kodu PDF dosyasında hiç geçmiyor."
+                    
                 progress_bar.progress((index + 1) / toplam_ders)
 
-            status_text.success("Tarama tamamlandı! Dosyayı indirebilirsiniz.")
+            status_text.success("İşlem ışık hızında tamamlandı! Dosyayı indirebilirsiniz.")
             
+            # Güncellenmiş Excel'i belleğe hazırla ve indirmeye sun
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df.to_excel(writer, index=False, sheet_name='Güncel Dersler')
@@ -126,9 +126,9 @@ if uploaded_file is not None:
             st.download_button(
                 label="📥 Güncellenmiş Excel Dosyasını İndir",
                 data=output,
-                file_name='Doldurulmus_Dersler_V3.xlsx',
+                file_name='Doldurulmus_Dersler_PDF.xlsx',
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             )
-            
+
     except Exception as e:
         st.error(f"Dosya işlenirken bir hata oluştu: {e}")
