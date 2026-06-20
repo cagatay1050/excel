@@ -26,9 +26,9 @@ def get_driver():
     options.add_argument('--disable-dev-shm-usage')
     
     # İnternetten indirmek yerine Streamlit'in kendi içindeki uyumlu sürücüyü kullanıyoruz
-service = Service('/usr/bin/chromedriver')
-driver = webdriver.Chrome(service=service, options=options)
-return driver
+    service = Service('/usr/bin/chromedriver')
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
 
 # Kullanıcıdan EXCEL veya CSV dosyasını alma
 uploaded_file = st.file_uploader("Lütfen dosyanızı (.xlsx veya .csv) buraya yükleyin", type=['csv', 'xlsx'])
