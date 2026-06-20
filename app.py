@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import time
+import re
 from io import BytesIO
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -19,7 +20,7 @@ def get_driver():
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('window-size=1920x1080') # Site tabloyu daraltmasın diye tam ekran
+    options.add_argument('window-size=1920x1080')
     service = Service('/usr/bin/chromedriver')
     driver = webdriver.Chrome(service=service, options=options)
     return driver
@@ -53,34 +54,33 @@ if uploaded_file is not None:
                     progress_bar.progress((index + 1) / toplam_ders)
                     continue
                     
-                status_text.text(f"İşleniyor: {ders_kodu} aranıyor...")
+                # Harf ve rakam arasına otomatik boşluk koy (Örn: EMBO101 -> EMBO 101)
+                sitedeki_kod = re.sub(r'([A-Za-zğüşıöçĞÜŞİÖÇ]+)(\d+)', r'\1 \2', ders_kodu)
+                
+                status_text.text(f"İşleniyor: {sitedeki_kod} aranıyor...")
                 
                 try:
                     driver.get(bologna_url)
-                    time.sleep(3) # Yüklenme süresini artırdık
+                    time.sleep(2) 
                     
-                    # --- 1. ADIM: Agresif Link Bulma ---
-                    # Ders kodunu içeren herhangi bir satırdaki ilk tıklanabilir 'a' etiketini bul.
-                    # Eğer tam kod yoksa, kodun ilk 4 harfi ve son 3 rakamını araya boşluk koyarak da (Örn: EMBO 103) dene.
-                    kodu_bol = ders_kodu.replace(" ", "")
-                    esnek_kod = f"{kodu_bol[:4]} {kodu_bol[4:]}" if len(kodu_bol) > 4 else ders_kodu
-                    
-                    xpath_sorgusu = f"//tr[contains(., '{ders_kodu}') or contains(., '{esnek_kod}')]//a"
+                    # 1. ADIM: Doğrudan ders kodunun yazılı olduğu linki bul
+                    xpath_sorgusu = f"//a[contains(text(), '{ders_kodu}') or contains(text(), '{sitedeki_kod}')]"
                     
                     try:
                         ders_linki = WebDriverWait(driver, 5).until(
                             EC.element_to_be_clickable((By.XPATH, xpath_sorgusu))
                         )
+                        # Tıklamadan önce ekranda o bölüme kaydır
                         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", ders_linki)
                         time.sleep(1)
                         driver.execute_script("arguments[0].click();", ders_linki)
-                        time.sleep(3) # İçerik sayfasının yüklenmesini bekle
+                        time.sleep(2) 
                     except:
-                        df.at[index, 'İşlem Durumu'] = "HATA: Ders listede hiç bulunamadı."
+                        df.at[index, 'İşlem Durumu'] = f"HATA: '{sitedeki_kod}' sayfada link olarak bulunamadı."
                         progress_bar.progress((index + 1) / toplam_ders)
                         continue
                     
-                    # --- 2. ADIM: İçerik Sayfasında Verileri Arama ---
+                    # 2. ADIM: İçerik Sayfasından Verileri Çek
                     veri_bulundu = False
                     
                     try:
@@ -109,7 +109,7 @@ if uploaded_file is not None:
                     if veri_bulundu:
                         df.at[index, 'İşlem Durumu'] = "BAŞARILI"
                     else:
-                        df.at[index, 'İşlem Durumu'] = "KISMİ HATA: Sayfaya girildi ama veriler (HTML kimlikleri) okunamadı."
+                        df.at[index, 'İşlem Durumu'] = "KISMİ HATA: Linke tıklandı ama içerik ID'leri eşleşmedi."
                         
                 except Exception as e:
                     df.at[index, 'İşlem Durumu'] = f"SİSTEM HATASI: {str(e)[:50]}"
@@ -126,7 +126,7 @@ if uploaded_file is not None:
             st.download_button(
                 label="📥 Güncellenmiş Excel Dosyasını İndir",
                 data=output,
-                file_name='Doldurulmus_Dersler_V2.xlsx',
+                file_name='Doldurulmus_Dersler_V3.xlsx',
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             )
             
