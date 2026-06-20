@@ -19,7 +19,7 @@ def get_driver():
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    # Uyarı: Streamlit Cloud üzerindeki sürücüyü kullanır
+    options.add_argument('window-size=1920x1080') # Site tabloyu daraltmasın diye tam ekran
     service = Service('/usr/bin/chromedriver')
     driver = webdriver.Chrome(service=service, options=options)
     return driver
@@ -35,7 +35,6 @@ if uploaded_file is not None:
             
         st.success("Dosya başarıyla okundu!")
         
-        # Hata tespiti için yeni sütun ekliyoruz
         if 'İşlem Durumu' not in df.columns:
             df['İşlem Durumu'] = "İşlem Görmedi"
         
@@ -58,35 +57,49 @@ if uploaded_file is not None:
                 
                 try:
                     driver.get(bologna_url)
-                    time.sleep(2) # Sitenin yüklenmesini bekle
+                    time.sleep(3) # Yüklenme süresini artırdık
                     
-                    # 1. ADIM: Ders Kodunu Ana Tabloda Bulma
+                    # --- 1. ADIM: Agresif Link Bulma ---
+                    # Ders kodunu içeren herhangi bir satırdaki ilk tıklanabilir 'a' etiketini bul.
+                    # Eğer tam kod yoksa, kodun ilk 4 harfi ve son 3 rakamını araya boşluk koyarak da (Örn: EMBO 103) dene.
+                    kodu_bol = ders_kodu.replace(" ", "")
+                    esnek_kod = f"{kodu_bol[:4]} {kodu_bol[4:]}" if len(kodu_bol) > 4 else ders_kodu
+                    
+                    xpath_sorgusu = f"//tr[contains(., '{ders_kodu}') or contains(., '{esnek_kod}')]//a"
+                    
                     try:
-                        xpath_sorgusu = f"//td[contains(text(), '{ders_kodu}')]/following-sibling::td/a"
-                        ders_linki = WebDriverWait(driver, 4).until(
+                        ders_linki = WebDriverWait(driver, 5).until(
                             EC.element_to_be_clickable((By.XPATH, xpath_sorgusu))
                         )
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", ders_linki)
+                        time.sleep(1)
                         driver.execute_script("arguments[0].click();", ders_linki)
-                        time.sleep(2) 
+                        time.sleep(3) # İçerik sayfasının yüklenmesini bekle
                     except:
-                        df.at[index, 'İşlem Durumu'] = "HATA: Ders kodu ana sayfadaki listede bulunamadı veya link tıklanamadı."
+                        df.at[index, 'İşlem Durumu'] = "HATA: Ders listede hiç bulunamadı."
                         progress_bar.progress((index + 1) / toplam_ders)
-                        continue # Diğer derse geç
+                        continue
                     
-                    # 2. ADIM: İçerik Sayfasında Verileri Arama
+                    # --- 2. ADIM: İçerik Sayfasında Verileri Arama ---
                     veri_bulundu = False
                     
                     try:
-                        # Sayfadaki tüm metni çekip ID'den bağımsız olarak arama yapmayı deneyelim
-                        akts = driver.find_element(By.XPATH, "//*[contains(@id, 'AKTS') or contains(@id, 'Akts')]").text
+                        akts = driver.find_element(By.XPATH, "//*[contains(translate(@id, 'akts', 'AKTS'), 'AKTS')]").text
                         df.at[index, 'AKTS'] = akts
                         veri_bulundu = True
                     except:
                         pass
                         
                     try:
-                        ders_amaci = driver.find_element(By.XPATH, "//*[contains(@id, 'Amac') or contains(@id, 'amac')]").text
+                        ders_amaci = driver.find_element(By.XPATH, "//*[contains(translate(@id, 'amac', 'AMAC'), 'AMAC')]").text
                         df.at[index, 'Dersin Amacı ve İçeriği'] = ders_amaci
+                        veri_bulundu = True
+                    except:
+                        pass
+                        
+                    try:
+                        haftalik_saat = driver.find_element(By.XPATH, "//*[contains(translate(@id, 'teorik', 'TEORIK'), 'TEORIK') or contains(translate(@id, 'saat', 'SAAT'), 'SAAT')]").text
+                        df.at[index, 'Haftalık Ders Saati'] = haftalik_saat
                         veri_bulundu = True
                     except:
                         pass
@@ -94,16 +107,16 @@ if uploaded_file is not None:
                     df.at[index, 'Varsa Ders Bilgi Paketi Adresi'] = driver.current_url
                     
                     if veri_bulundu:
-                        df.at[index, 'İşlem Durumu'] = "BAŞARILI: Veriler çekildi."
+                        df.at[index, 'İşlem Durumu'] = "BAŞARILI"
                     else:
-                        df.at[index, 'İşlem Durumu'] = "KISMİ HATA: Dersin sayfasına girildi ama sayfadaki HTML ID'leri eşleşmedi."
+                        df.at[index, 'İşlem Durumu'] = "KISMİ HATA: Sayfaya girildi ama veriler (HTML kimlikleri) okunamadı."
                         
                 except Exception as e:
                     df.at[index, 'İşlem Durumu'] = f"SİSTEM HATASI: {str(e)[:50]}"
                 
                 progress_bar.progress((index + 1) / toplam_ders)
 
-            status_text.success("Tarama tamamlandı! Lütfen dosyayı indirip 'İşlem Durumu' sütununu kontrol edin.")
+            status_text.success("Tarama tamamlandı! Dosyayı indirebilirsiniz.")
             
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -113,7 +126,7 @@ if uploaded_file is not None:
             st.download_button(
                 label="📥 Güncellenmiş Excel Dosyasını İndir",
                 data=output,
-                file_name='Doldurulmus_Dersler_Raporlu.xlsx',
+                file_name='Doldurulmus_Dersler_V2.xlsx',
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             )
             
